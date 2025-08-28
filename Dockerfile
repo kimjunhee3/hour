@@ -1,10 +1,20 @@
+# Dockerfile
 FROM python:3.11-slim
 
-# 시스템 패키지 & 크롬 설치
+# 시스템 패키지 & 크롬/드라이버 설치
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium chromium-driver fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
-    ca-certificates wget curl gnupg && \
-    rm -rf /var/lib/apt/lists/*
+    chromium chromium-driver \
+    fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
+    ca-certificates wget curl gnupg tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# 크롬/드라이버 바이너리 경로 환경변수 (Selenium이 찾기 쉽게)
+ENV CHROME_BIN=/usr/bin/chromium
+ENV CHROMEDRIVER=/usr/lib/chromium/chromedriver
+ENV PATH="$PATH:/usr/lib/chromium:/usr/bin"
+
+# 드라이버를 PATH 상 위치로 심볼릭 링크 (일부 환경에서 필요)
+RUN ln -sf /usr/lib/chromium/chromedriver /usr/bin/chromedriver
 
 WORKDIR /app
 
@@ -13,10 +23,13 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 캐시용 디렉토리 (Railway 볼륨을 /data로 마운트할 것)
+# 캐시 디렉토리 준비
 RUN mkdir -p /data
 ENV CACHE_DIR=/data
 ENV PYTHONUNBUFFERED=1
 
-# gunicorn으로 앱 실행, Railway의 $PORT 사용
+# Tini로 좀비프로세스 방지 (선택)
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Railway의 $PORT 사용
 CMD ["sh", "-c", "gunicorn -w 2 -k gthread -t 180 -b 0.0.0.0:${PORT} wsgi:application"]
