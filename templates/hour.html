@@ -34,23 +34,28 @@
 <body>
     <div class="container">
         <h2>⚾ 팀별 평균 경기시간 조회 ⚾</h2>
-        <form method="post">
+
+        <!-- GET 방식: URL에 ?myteam=팀명 으로 전달되어 북마크/공유 가능 -->
+        <form method="get" action="/hour">
             <label for="myteam">입장팀 선택:</label>
+            {% set selected = (request.args.get('myteam') or selected_team or '') %}
             <select name="myteam" id="myteam">
-                <option value="SSG"   {% if request.form.get('myteam') == 'SSG' %}selected{% endif %}>SSG</option>
-                <option value="KIA"   {% if request.form.get('myteam') == 'KIA' %}selected{% endif %}>KIA</option>
-                <option value="한화"  {% if request.form.get('myteam') == '한화' %}selected{% endif %}>한화</option>
-                <option value="롯데"  {% if request.form.get('myteam') == '롯데' %}selected{% endif %}>롯데</option>
-                <option value="두산"  {% if request.form.get('myteam') == '두산' %}selected{% endif %}>두산</option>
-                <option value="LG"    {% if request.form.get('myteam') == 'LG' %}selected{% endif %}>LG</option>
-                <option value="삼성"  {% if request.form.get('myteam') == '삼성' %}selected{% endif %}>삼성</option>
-                <option value="KT"    {% if request.form.get('myteam') == 'KT' %}selected{% endif %}>KT</option>
-                <option value="NC"    {% if request.form.get('myteam') == 'NC' %}selected{% endif %}>NC</option>
-                <option value="키움"  {% if request.form.get('myteam') == '키움' %}selected{% endif %}>키움</option>
+                <option value="SSG"   {% if selected == 'SSG' %}selected{% endif %}>SSG</option>
+                <option value="KIA"   {% if selected == 'KIA' %}selected{% endif %}>KIA</option>
+                <option value="한화"  {% if selected == '한화' %}selected{% endif %}>한화</option>
+                <option value="롯데"  {% if selected == '롯데' %}selected{% endif %}>롯데</option>
+                <option value="두산"  {% if selected == '두산' %}selected{% endif %}>두산</option>
+                <option value="LG"    {% if selected == 'LG' %}selected{% endif %}>LG</option>
+                <option value="삼성"  {% if selected == '삼성' %}selected{% endif %}>삼성</option>
+                <option value="KT"    {% if selected == 'KT' %}selected{% endif %}>KT</option>
+                <option value="NC"    {% if selected == 'NC' %}selected{% endif %}>NC</option>
+                <option value="키움"  {% if selected == '키움' %}selected{% endif %}>키움</option>
             </select>
             <button type="submit">조회</button>
         </form>
+
         <hr>
+
         {% if result %}
         <div class="result-block">
             {% set myteam = selected_team %}
@@ -92,4 +97,3 @@
     </div>
 </body>
 </html>
-
