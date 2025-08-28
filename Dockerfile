@@ -1,18 +1,19 @@
 FROM python:3.11-slim
 
-# 시스템 패키지 & 크롬/드라이버 설치
+# 시스템 업데이트 + chromium, chromedriver 설치
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium chromium-driver \
+    chromium \
+    chromium-driver \
     fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
     ca-certificates wget curl gnupg tini \
     && rm -rf /var/lib/apt/lists/*
 
-# 경로 환경변수
+# 환경변수: 바이너리/드라이버 경로
 ENV CHROME_BIN=/usr/bin/chromium
 ENV CHROMEDRIVER=/usr/lib/chromium/chromedriver
 ENV PATH="$PATH:/usr/lib/chromium:/usr/bin"
 
-# ✅ 다양한 이름으로 찾도록 심볼릭 링크
+# ✅ 심볼릭 링크 강제 생성 (어느 경로로 호출해도 찾게끔)
 RUN ln -sf /usr/lib/chromium/chromedriver /usr/bin/chromedriver && \
     ln -sf /usr/bin/chromium /usr/bin/google-chrome && \
     ln -sf /usr/bin/chromium /usr/bin/chrome
@@ -24,12 +25,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 캐시 디렉토리
+# 캐시 저장 폴더
 RUN mkdir -p /data
 ENV CACHE_DIR=/data
 ENV PYTHONUNBUFFERED=1
-# Selenium Manager가 드라이버를 내려받으려다 실패하는 걸 방지(우리는 시스템 드라이버 사용)
-ENV SELENIUM_MANAGER=off
+ENV SELENIUM_MANAGER=off   # Selenium이 자체로 드라이버 다운로드 시도하는 걸 막음
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["sh", "-c", "gunicorn -w 2 -k gthread -t 180 -b 0.0.0.0:${PORT} wsgi:application"]
