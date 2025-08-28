@@ -13,6 +13,7 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from bs4 import BeautifulSoup
 import pandas as pd
+import shutil, os
 
 app = Flask(__name__)
 CORS(app)  # 다른 도메인 프론트에서 호출시 CORS 허용(필요하면 origins 제한)
@@ -73,7 +74,12 @@ def delete_all_caches():
 # ====== Selenium 드라이버 (컨테이너 친화) ======
 def make_driver():
     options = Options()
-    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/chromium")
+
+    # ✅ 브라우저 바이너리: chromium 고정
+    chrome_bin = os.environ.get("CHROME_BIN") or "/usr/bin/chromium"
+    options.binary_location = chrome_bin
+
+    # Headless + 컨테이너 옵션
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -85,13 +91,34 @@ def make_driver():
         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     )
 
-    # ✅ pageLoadStrategy는 이제 Options에 직접 설정
+    # ✅ Selenium 4: 페이지 로드 전략은 Options에 설정
     options.page_load_strategy = "eager"
 
-    driver_path = os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver")
-    service = Service(executable_path=driver_path)
+    # ✅ 드라이버 경로 확정(우선순위대로 검사)
+    candidates = [
+        os.environ.get("CHROMEDRIVER"),
+        "/usr/bin/chromedriver",
+        "/usr/lib/chromium/chromedriver",
+    ]
+    driver_path = next((p for p in candidates if p and os.path.exists(p)), None)
 
-    # ✅ desired_capabilities 제거
+    if not driver_path:
+        # whereis/which 로 한 번 더 탐색
+        for p in (shutil.which("chromedriver"), "/snap/bin/chromedriver"):
+            if p and os.path.exists(p):
+                driver_path = p
+                break
+
+    if not driver_path:
+        raise RuntimeError(
+            "chromedriver를 찾을 수 없습니다. 패키지 'chromium-driver' 설치 및 "
+            "심볼릭 링크(/usr/bin/chromedriver) 확인 필요"
+        )
+
+    # ✅ 환경변수로도 드라이버 경로를 알려줌(일부 환경 보완)
+    os.environ["webdriver.chrome.driver"] = driver_path
+
+    service = Service(executable_path=driver_path)
     return webdriver.Chrome(service=service, options=options)
 
 
