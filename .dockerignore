@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+.env
+.vscode/
+.idea/
+.git/
+.gitignore
+data/
+runtime_cache.json
+schedule_index.json
