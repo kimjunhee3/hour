@@ -29,7 +29,7 @@ COPY . .
 RUN mkdir -p /data
 ENV CACHE_DIR=/data
 ENV PYTHONUNBUFFERED=1
-ENV SELENIUM_MANAGER=off   # Selenium이 자체로 드라이버 다운로드 시도하는 걸 막음
+ENV SELENIUM_MANAGER=off 
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["sh", "-c", "gunicorn -w 2 -k gthread -t 180 -b 0.0.0.0:${PORT} wsgi:application"]
