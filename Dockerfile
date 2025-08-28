@@ -1,22 +1,20 @@
 FROM python:3.11-slim
 
-# 시스템 업데이트 + chromium, chromedriver 설치
+# 1) 기본 패키지
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
-    chromium-driver \
+    wget gnupg ca-certificates \
     fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
-    ca-certificates wget curl gnupg tini \
+    tini \
     && rm -rf /var/lib/apt/lists/*
 
-# 환경변수: 바이너리/드라이버 경로
-ENV CHROME_BIN=/usr/bin/chromium
-ENV CHROMEDRIVER=/usr/lib/chromium/chromedriver
-ENV PATH="$PATH:/usr/lib/chromium:/usr/bin"
+# 2) Google Chrome 설치 (공식 저장소 추가)
+RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-linux.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-linux.gpg] http://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && apt-get install -y --no-install-recommends google-chrome-stable && \
+    rm -rf /var/lib/apt/lists/*
 
-# ✅ 심볼릭 링크 강제 생성 (어느 경로로 호출해도 찾게끔)
-RUN ln -sf /usr/lib/chromium/chromedriver /usr/bin/chromedriver && \
-    ln -sf /usr/bin/chromium /usr/bin/google-chrome && \
-    ln -sf /usr/bin/chromium /usr/bin/chrome
+# Chrome 바이너리 경로 환경변수
+ENV CHROME_BIN=/usr/bin/google-chrome
 
 WORKDIR /app
 
@@ -25,11 +23,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# 캐시 저장 폴더
+# 캐시 디렉토리 (Railway 볼륨을 /data로 마운트)
 RUN mkdir -p /data
 ENV CACHE_DIR=/data
 ENV PYTHONUNBUFFERED=1
-ENV SELENIUM_MANAGER=off 
 
 ENTRYPOINT ["/usr/bin/tini", "--"]
+
+# Railway가 주는 $PORT로 바인딩
 CMD ["sh", "-c", "gunicorn -w 2 -k gthread -t 180 -b 0.0.0.0:${PORT} wsgi:application"]
