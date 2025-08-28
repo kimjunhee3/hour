@@ -5,7 +5,6 @@ from datetime import datetime, timedelta
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service  # (직접 경로 지정은 안 쓰지만 import 유지)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -23,12 +22,13 @@ bottom70 = 194
 START_DATE = os.environ.get("START_DATE", "2025-03-22")
 MAX_DAYS   = int(os.environ.get("MAX_DAYS", "60"))
 
-# ====== 캐시 디렉토리/파일 ======
-CACHE_DIR = os.environ.get("CACHE_DIR", "/data")
+# ====== 캐시 디렉토리: 무료 플랜용 -> /tmp 에 저장 (컨테이너 살아있는 동안만 유지) ======
+CACHE_DIR = os.environ.get("CACHE_DIR", "/tmp")
 os.makedirs(CACHE_DIR, exist_ok=True)
 RUNTIME_CACHE_FILE  = os.path.join(CACHE_DIR, "runtime_cache.json")
 SCHEDULE_CACHE_FILE = os.path.join(CACHE_DIR, "schedule_index.json")
 
+# ====== JSON 유틸 ======
 def _load_json(path, default):
     if os.path.exists(path):
         try:
@@ -69,14 +69,12 @@ def delete_all_caches():
             try: os.remove(p)
             except Exception: pass
 
-# ====== Selenium 드라이버 (Chrome + Selenium Manager 자동드라이버) ======
+# ====== Selenium 드라이버 (Google Chrome + Selenium Manager 자동드라이버) ======
 def make_driver():
     options = Options()
-    # Google Chrome 바이너리를 명시
     chrome_bin = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
     options.binary_location = chrome_bin
 
-    # Headless & 컨테이너 옵션
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -87,10 +85,9 @@ def make_driver():
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     )
-    # Selenium 4 방식: 로드 전략
     options.page_load_strategy = "eager"
 
-    # 👉 드라이버 경로 지정하지 않음: Selenium Manager가 자동으로 다운로드/매칭
+    # 드라이버 경로 지정 안 함 -> Selenium Manager가 자동으로 맞는 chromedriver 다운로드/사용
     return webdriver.Chrome(options=options)
 
 # ====== 크롤링 유틸 ======
@@ -241,7 +238,7 @@ def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
     else:
         return None, []
 
-# ====== 메인 라우트 ======
+# ====== 라우트 ======
 @app.route("/", methods=["GET", "POST"])
 def index():
     result = None
@@ -303,15 +300,6 @@ def _file_info(path):
 @app.route("/healthz")
 def healthz():
     return "ok", 200
-
-@app.route("/selenium/env")
-def selenium_env():
-    import shutil
-    return jsonify({
-        "CACHE_DIR": os.path.abspath(CACHE_DIR),
-        "CHROME_BIN": os.environ.get("CHROME_BIN"),
-        "which_google_chrome": shutil.which("google-chrome"),
-    })
 
 @app.route("/selenium/smoke")
 def selenium_smoke():
