@@ -80,16 +80,20 @@ def make_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1280,1200")
     options.add_argument("--lang=ko-KR")
-    options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+    options.add_argument(
+        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+    )
 
-    # DOMContentLoaded까지만 대기
-    from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
-    caps = DesiredCapabilities.CHROME.copy()
-    caps["pageLoadStrategy"] = "eager"
+    # ✅ pageLoadStrategy는 이제 Options에 직접 설정
+    options.page_load_strategy = "eager"
 
     driver_path = os.environ.get("CHROMEDRIVER", "/usr/bin/chromedriver")
     service = Service(executable_path=driver_path)
-    return webdriver.Chrome(service=service, options=options, desired_capabilities=caps)
+
+    # ✅ desired_capabilities 제거
+    return webdriver.Chrome(service=service, options=options)
+
 
 # ====== 크롤링 유틸 ======
 def get_today_cards(driver):
