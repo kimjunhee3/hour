@@ -12,18 +12,18 @@ from selenium.webdriver.support import expected_conditions as EC
 
 from bs4 import BeautifulSoup
 import pandas as pd
+import requests  # ★ 추가: 빠른 경로용
 
 app = Flask(__name__)
 CORS(app)
 
 # ====== 기준값 / 설정 ======
-top30 = 168          # 2시간 48분
-avg_ref = 182.7      # 기준 평균
-bottom70 = 194       # 3시간 14분
+top30 = 168
+avg_ref = 182.7
+bottom70 = 194
 START_DATE = os.environ.get("START_DATE", "2025-03-22")
 
 # ====== 캐시 디렉토리 ======
-# 영구 유지 원하면 Railway에서 /data 볼륨 마운트 권장 (CACHE_DIR=/data)
 CACHE_DIR = os.environ.get("CACHE_DIR", "/data")
 os.makedirs(CACHE_DIR, exist_ok=True)
 RUNTIME_CACHE_FILE  = os.path.join(CACHE_DIR, "runtime_cache.json")
@@ -64,6 +64,17 @@ def set_schedule_cache_for_date(date_str, games_minimal_list):
 def make_runtime_key(game_id: str, game_date: str) -> str:
     return f"{game_id}_{game_date}"
 
+# ====== HTTP 세션 (빠른 경로) ======
+def make_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                       "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"),
+        "Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    })
+    s.timeout = 12
+    return s
+
 # ====== 팀명 정규화 ======
 _ALIAS_MAP = {
     "SSG": ["SSG", "SSG랜더스", "SSG Landers", "랜더스"],
@@ -82,7 +93,7 @@ for canon, aliases in _ALIAS_MAP.items():
     for a in aliases:
         k = a.strip().lower()
         _ALIAS_LOOKUP[k] = canon
-        _ALIAS_LOOKUP[re.sub(r"\s+", "", k)] = canon  # 공백 제거 변형도 미리 등록
+        _ALIAS_LOOKUP[re.sub(r"\s+", "", k)] = canon
 
 _PATTERNS = [
     (re.compile(r"\bk\s*?t\b.*\bwiz\b", re.I), "KT"),
@@ -103,37 +114,164 @@ def normalize_team(name: str) -> str | None:
     if "타이거" in name or "기아" in name: return "KIA"
     return name.strip()
 
-# ====== Selenium 드라이버 (Chrome + Selenium Manager) ======
+# ====== Selenium 드라이버 ======
 def make_driver():
     options = Options()
-    chrome_bin = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
-    options.binary_location = chrome_bin
-
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1280,1200")
     options.add_argument("--lang=ko-KR")
-    options.add_argument(
-        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
-    )
+    options.add_argument("--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36")
     options.page_load_strategy = "eager"
     return webdriver.Chrome(options=options)
 
-# ====== 크롤링 유틸 ======
+# ====== 스케줄: HTTP 우선, 실패 시 Selenium ======
+def get_games_for_date_fast(session, date_str):
+    cache = get_schedule_cache()
+    if date_str in cache:
+        return cache[date_str]
+
+    url = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={date_str}"
+    games_minimal = []
+    try:
+        r = session.get(url, timeout=12)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        cards = soup.select("li.game-cont") or soup.select("li[class*='game-cont']")
+        for li in cards:
+            info = extract_match_info_from_card_bs(li)
+            if all([info.get("home"), info.get("away"), info.get("g_id"), info.get("g_dt")]):
+                games_minimal.append(info)
+    except Exception:
+        # 폴백: Selenium
+        d = make_driver()
+        try:
+            wait = WebDriverWait(d, 15)
+            d.get(url)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div#contents")))
+            time.sleep(0.4)
+            soup = BeautifulSoup(d.page_source, "html.parser")
+            cards = soup.select("li.game-cont") or soup.select("li[class*='game-cont']")
+            for li in cards:
+                info = extract_match_info_from_card_bs(li)
+                if all([info.get("home"), info.get("away"), info.get("g_id"), info.get("g_dt")]):
+                    games_minimal.append(info)
+        finally:
+            try: d.quit()
+            except: pass
+
+    set_schedule_cache_for_date(date_str, games_minimal)
+    return games_minimal
+
+def extract_match_info_from_card_bs(card_li):
+    # BeautifulSoup Tag 버전
+    home_nm = card_li.get("home_nm")
+    away_nm = card_li.get("away_nm")
+    g_id = card_li.get("g_id")
+    g_dt = card_li.get("g_dt")
+
+    if not (home_nm and away_nm):
+        home_alt = card_li.select_one(".team.home .emb img")
+        away_alt = card_li.select_one(".team.away .emb img")
+        if away_alt and not away_nm: away_nm = (away_alt.get("alt") or "").strip() or None
+        if home_alt and not home_nm: home_nm = (home_alt.get("alt") or "").strip() or None
+
+    if not (home_nm and away_nm):
+        txt = card_li.get_text(" ", strip=True)
+        m = re.search(r"([A-Za-z가-힣]+)\s*vs\s*([A-Za-z가-힣]+)", txt, re.I)
+        if m:
+            a, b = m.group(1), m.group(2)
+            away_nm = away_nm or a
+            home_nm = home_nm or b
+
+    if not (g_id and g_dt):
+        a = card_li.select_one("a[href*='GameCenter/Main.aspx'][href*='gameId='][href*='gameDate=']")
+        if a and a.has_attr("href"):
+            href = a["href"]
+            gm = re.search(r"gameId=([A-Z0-9]+)", href)
+            dm = re.search(r"gameDate=(\d{8})", href)
+            if gm: g_id = g_id or gm.group(1)
+            if dm: g_dt = g_dt or dm.group(1)
+
+    return {"home": home_nm, "away": away_nm, "g_id": g_id, "g_dt": g_dt}
+
+# ====== 리뷰 런타임: HTTP 우선, 실패 시 Selenium ======
+def open_review_and_get_runtime_fast(session, game_id, game_date):
+    key = make_runtime_key(game_id, game_date)
+    rc = get_runtime_cache()
+    hit = rc.get(key)
+    if hit and "runtime_min" in hit:
+        return hit["runtime_min"]
+
+    # HTTP 시도 (REVIEW 섹션 직접)
+    base = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameId={game_id}&gameDate={game_date}&section=REVIEW"
+    try:
+        r = session.get(base, timeout=12)
+        r.raise_for_status()
+        soup = BeautifulSoup(r.text, "html.parser")
+        span = soup.select_one("div.record-etc span#txtRunTime")
+        if span:
+            runtime = span.get_text(strip=True)
+            m = re.search(r"(\d{1,2})\s*[:：]\s*(\d{2})", runtime)
+            if not m:
+                m = re.search(r"(\d{1,2})\s*시간\s*(\d{1,2})\s*분", runtime)
+            if m:
+                h, mnt = int(m.group(1)), int(m.group(2))
+                run_time_min = h * 60 + mnt
+                set_runtime_cache(key, run_time_min)
+                return run_time_min
+    except Exception:
+        pass
+
+    # 폴백: Selenium 클릭
+    d = make_driver()
+    try:
+        wait = WebDriverWait(d, 12)
+        base2 = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameId={game_id}&gameDate={game_date}"
+        d.get(base2)
+        try:
+            review_tab = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '리뷰')]")))
+            review_tab.click()
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.record-etc")))
+        except Exception:
+            d.get(base2 + "&section=REVIEW")
+            try:
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.record-etc")))
+            except Exception:
+                pass
+        soup = BeautifulSoup(d.page_source, "html.parser")
+        span = soup.select_one("div.record-etc span#txtRunTime")
+        if span:
+            runtime = span.get_text(strip=True)
+            m = re.search(r"(\d{1,2})\s*[:：]\s*(\d{2})", runtime)
+            if not m:
+                m = re.search(r"(\d{1,2})\s*시간\s*(\d{1,2})\s*분", runtime)
+            if m:
+                h, mnt = int(m.group(1)), int(m.group(2))
+                run_time_min = h * 60 + mnt
+                set_runtime_cache(key, run_time_min)
+                return run_time_min
+    finally:
+        try: d.quit()
+        except: pass
+
+    return None
+
+# ====== 오늘 카드(Selenium) - UI용만 사용 ======
 def get_today_cards(driver):
-    wait = WebDriverWait(driver, 20)
+    wait = WebDriverWait(driver, 15)
     today = datetime.today().strftime("%Y%m%d")
     url = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}"
     driver.get(url)
     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div#contents")))
-    time.sleep(0.6)
     soup = BeautifulSoup(driver.page_source, "html.parser")
     return soup.select("li.game-cont") or soup.select("li[class*='game-cont']")
 
 def extract_match_info_from_card(card_li):
+    # (Selenium 전용 Tag) — 기존과 동일
     home_nm = card_li.get("home_nm")
     away_nm = card_li.get("away_nm")
     g_id = card_li.get("g_id")
@@ -175,136 +313,50 @@ def find_today_matches_for_team(driver, my_team):
             continue
         if my_canon in {normalize_team(h), normalize_team(a)}:
             rival_raw = h if normalize_team(a) == my_canon else a
-            info["rival"] = normalize_team(rival_raw) or rival_raw  # rival도 정규화
+            info["rival"] = normalize_team(rival_raw) or rival_raw
             results.append(info)
     return results
 
-def get_games_for_date(driver, date_str):
-    cache = get_schedule_cache()
-    if date_str in cache:
-        return cache[date_str]
-
-    wait = WebDriverWait(driver, 20)
-    url = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={date_str}"
-    driver.get(url)
-    try:
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div#contents")))
-    except Exception:
-        set_schedule_cache_for_date(date_str, [])
-        return []
-
-    time.sleep(0.5)
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    cards = soup.select("li.game-cont") or soup.select("li[class*='game-cont']")
-    games_minimal = []
-    for li in cards:
-        info = extract_match_info_from_card(li)
-        if all([info.get("home"), info.get("away"), info.get("g_id"), info.get("g_dt")]):
-            games_minimal.append({
-                "home": info["home"],
-                "away": info["away"],
-                "g_id": info["g_id"],
-                "g_dt": info["g_dt"],
-            })
-
-    set_schedule_cache_for_date(date_str, games_minimal)
-    return games_minimal
-
-def open_review_and_get_runtime(driver, game_id, game_date):
-    today_str = datetime.today().strftime("%Y%m%d")
-    use_cache = (game_date != today_str)
-    key = make_runtime_key(game_id, game_date)
-
-    if use_cache:
-        rc = get_runtime_cache()
-        hit = rc.get(key)
-        if hit and isinstance(hit, dict) and "runtime_min" in hit:
-            return hit["runtime_min"]
-
-    wait = WebDriverWait(driver, 15)
-    base = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameId={game_id}&gameDate={game_date}"
-    driver.get(base)
-    try:
-        review_tab = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '리뷰')]")))
-        review_tab.click()
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.record-etc")))
-    except Exception:
-        driver.get(base + "&section=REVIEW")
-        try:
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.record-etc")))
-        except Exception:
-            pass
-
-    time.sleep(0.5)
-    soup = BeautifulSoup(driver.page_source, "html.parser")
-    run_time_min = None
-    record_etc = soup.select_one("div.record-etc")
-    if record_etc:
-        span = record_etc.select_one("span#txtRunTime")
-        if span:
-            runtime = span.get_text(strip=True)
-            # 시:분 또는 "X시간 Y분" 모두 허용
-            m = re.search(r"(\d{1,2})\s*[:：]\s*(\d{2})", runtime)
-            if not m:
-                m = re.search(r"(\d{1,2})\s*시간\s*(\d{1,2})\s*분", runtime)
-            if m:
-                h, mnt = int(m.group(1)), int(m.group(2))
-                run_time_min = h * 60 + mnt
-
-    if use_cache and run_time_min is not None:
-        set_runtime_cache(key, run_time_min)
-
-    return run_time_min
-
-# ====== 핵심: 60일 캡 제거 (START_DATE부터 어제까지 전체 사용) ======
+# ====== 핵심: START_DATE~어제까지 전체 계산 (빠른 경로 활용) ======
 def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
-    d = make_driver()
-    try:
-        today_minus_1 = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
-        # START_DATE 형식 유연 처리
-        if "-" in start_date:
-            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-        else:
-            start_dt = datetime.strptime(start_date, "%Y%m%d")
-        dr = pd.date_range(start=start_dt.strftime("%Y%m%d"), end=today_minus_1)  # ✅ 전체 사용 (자르지 않음)
+    session = make_session()
+    today_minus_1 = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
 
-        date_list = [dt.strftime("%Y%m%d") for dt in dr]
+    if "-" in start_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    else:
+        start_dt = datetime.strptime(start_date, "%Y%m%d")
+    dr = pd.date_range(start=start_dt.strftime("%Y%m%d"), end=today_minus_1)  # 전체
 
-        my_canon = normalize_team(my_team)
-        rival_canon_set = {normalize_team(r) for r in (rival_set or set())} if rival_set else set()
+    my_canon = normalize_team(my_team)
+    rival_canon_set = {normalize_team(r) for r in (rival_set or set())} if rival_set else set()
 
-        run_times = []
-        for date in date_list:
-            games = get_games_for_date(d, date)
-            if not games:
+    run_times = []
+    # 1) 날짜별 스케줄은 HTTP로 빠르게
+    for dt in dr:
+        date_str = dt.strftime("%Y%m%d")
+        games = get_games_for_date_fast(session, date_str)
+        if not games:
+            continue
+        # 2) 내 팀 경기만 선별 → 리뷰시간은 HTTP 우선/필요시 Selenium
+        for g in games:
+            home = normalize_team(g["home"])
+            away = normalize_team(g["away"])
+            if my_canon not in {home, away}:
                 continue
-
-            for info in games:
-                home = normalize_team(info["home"])
-                away = normalize_team(info["away"])
-                if my_canon in {home, away}:
-                    opponent = home if away == my_canon else away
-                    if rival_canon_set and opponent not in rival_canon_set:
-                        continue
-                    try:
-                        rt = open_review_and_get_runtime(d, info["g_id"], info["g_dt"])
-                    except Exception:
-                        rt = None
-                    if rt is not None:
-                        run_times.append(rt)
-    finally:
-        try: d.quit()
-        except: pass
+            opponent = home if away == my_canon else away
+            if rival_canon_set and opponent not in rival_canon_set:
+                continue
+            rt = open_review_and_get_runtime_fast(session, g["g_id"], g["g_dt"])
+            if rt is not None:
+                run_times.append(rt)
 
     if run_times:
-        avg_time = round(sum(run_times) / len(run_times), 1)
-        return avg_time, run_times
-    else:
-        return None, []
+        return round(sum(run_times) / len(run_times), 1), run_times
+    return None, []
 
-# ====== 공통 처리 함수 ======
+# ====== 공통 처리 ======
 def compute_for_team(team_name):
-    """팀명 입력받아 오늘 상대/평균시간 계산 후 렌더링용 컨텍스트 반환."""
     if not team_name:
         return dict(
             result="팀을 선택해주세요.",
@@ -326,12 +378,10 @@ def compute_for_team(team_name):
             selected_team=team_name, top30=top30, avg_ref=avg_ref, bottom70=bottom70
         )
 
-    # rival을 '정규화된 이름'으로 수집
     rivals_today = {normalize_team(m["rival"]) for m in today_matches if m.get("rival")}
     rivals_str = ", ".join(sorted(rivals_today)) if rivals_today else "미확인"
 
     try:
-        # my_team도 정규화된 값으로 전달 + START_DATE부터 전체 사용
         avg_time, _ = collect_history_avg_runtime(normalize_team(team_name), rivals_today)
     except Exception:
         avg_time = None
@@ -355,7 +405,7 @@ def compute_for_team(team_name):
         selected_team=team_name, top30=top30, avg_ref=avg_ref, bottom70=bottom70
     )
 
-# ====== 라우트: GET/POST 모두 팀 파라미터 지원 ======
+# ====== 라우트 ======
 @app.route("/", methods=["GET", "POST"])
 @app.route("/hour", methods=["GET", "POST"])
 def hour_index():
@@ -367,10 +417,9 @@ def hour_index():
         )
         return render_template("hour.html", **ctx)
     except Exception as e:
-        # 오류를 페이지에 노출해 디버깅 쉽게
         return f"오류가 발생했습니다: {type(e).__name__}: {str(e)}", 200
 
-# ====== 진단/캐시 유틸 ======
+# ====== 헬스/캐시 ======
 def _file_info(path):
     if not os.path.exists(path):
         return {"exists": False}
@@ -417,164 +466,6 @@ def cache_clear():
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "deleted": deleted})
-
-# ====== (선택) 디버그 엔드포인트들 ======
-def _norm(name: str) -> str:
-    try:
-        return normalize_team(name)
-    except NameError:
-        return (name or "").strip()
-
-@app.route("/debug/config")
-def debug_config():
-    return jsonify({
-        "START_DATE": START_DATE,
-        "CACHE_DIR": CACHE_DIR,
-    })
-
-@app.route("/debug/date")
-def debug_date():
-    date_str = (request.args.get("date") or "").strip()
-    if not (re.fullmatch(r"\d{8}", date_str)):
-        return jsonify({"error": "date=YYYYMMDD 필요"}), 400
-    d = make_driver()
-    try:
-        games = get_games_for_date(d, date_str)
-    finally:
-        try: d.quit()
-        except: pass
-    items = []
-    for g in games:
-        items.append({
-            "home_raw": g.get("home"), "away_raw": g.get("away"),
-            "home_norm": _norm(g.get("home")), "away_norm": _norm(g.get("away")),
-            "game_id": g.get("g_id"), "game_date": g.get("g_dt")
-        })
-    return jsonify({"date": date_str, "games": items, "count": len(items)})
-
-@app.route("/debug/today")
-def debug_today():
-    team = (request.args.get("team") or "").strip()
-    if not team:
-        return jsonify({"error":"team 파라미터 필요"}), 400
-    d = make_driver()
-    try:
-        cards = get_today_cards(d)
-        parsed = []
-        for li in cards:
-            info = extract_match_info_from_card(li)
-            parsed.append({
-                "home_raw": info.get("home"),
-                "away_raw": info.get("away"),
-                "home_norm": _norm(info.get("home")),
-                "away_norm": _norm(info.get("away")),
-                "g_id": info.get("g_id"),
-                "g_dt": info.get("g_dt")
-            })
-        my = _norm(team)
-        rivals = set()
-        for it in parsed:
-            if my in {it["home_norm"], it["away_norm"]}:
-                rival = it["home_norm"] if it["away_norm"] == my else it["away_norm"]
-                rivals.add(rival)
-    finally:
-        try: d.quit()
-        except: pass
-
-    return jsonify({
-        "team_input": team,
-        "team_norm": my,
-        "rivals_today": sorted(list(rivals)),
-        "today_cards": parsed
-    })
-
-@app.route("/debug/avg_any_rival")
-def debug_avg_any_rival():
-    team = (request.args.get("team") or "").strip()
-    if not team:
-        return jsonify({"error":"team 파라미터 필요 (예: ?team=KIA)"}), 400
-    avg_time, runs = collect_history_avg_runtime(team, rival_set=None)
-    return jsonify({"team": team, "avg_time": avg_time, "samples": len(runs)})
-
-@app.route("/debug/history_reasons")
-def debug_history_reasons():
-    team = (request.args.get("team") or "").strip()
-    if not team:
-        return jsonify({"error":"team 파라미터 필요"}), 400
-    rival = (request.args.get("rival") or "").strip() or None
-    try:
-        days = int(request.args.get("days","60"))
-    except:
-        days = 60
-
-    my = _norm(team)
-    rival_norm = _norm(rival) if rival else None
-
-    d = make_driver()
-    try:
-        end = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
-        start = (datetime.today() - timedelta(days=days)).strftime("%Y%m%d")
-        dr = pd.date_range(start=start, end=end)
-
-        counts = {
-            "not_my_team": 0,
-            "my_team_but_rival_mismatch": 0,
-            "matched_but_no_runtime": 0,
-            "matched_with_runtime": 0,
-            "errors": 0
-        }
-        samples = {k: [] for k in counts}
-
-        for dt in dr:
-            date_str = dt.strftime("%Y%m%d")
-            games = get_games_for_date(d, date_str)
-            for g in games:
-                try:
-                    home_raw, away_raw = g["home"], g["away"]
-                    home, away = _norm(home_raw), _norm(away_raw)
-
-                    if my not in {home, away}:
-                        counts["not_my_team"] += 1
-                        if len(samples["not_my_team"]) < 6:
-                            samples["not_my_team"].append({"date":date_str,"home":home_raw,"away":away_raw})
-                        continue
-
-                    opp = home if away == my else away
-                    if rival_norm and opp != rival_norm:
-                        counts["my_team_but_rival_mismatch"] += 1
-                        if len(samples["my_team_but_rival_mismatch"]) < 6:
-                            samples["my_team_but_rival_mismatch"].append({
-                                "date":date_str,"home":home_raw,"away":away_raw,"opponent_norm":opp
-                            })
-                        continue
-
-                    rt = open_review_and_get_runtime(d, g["g_id"], g["g_dt"])
-                    if rt is None:
-                        counts["matched_but_no_runtime"] += 1
-                        if len(samples["matched_but_no_runtime"]) < 6:
-                            samples["matched_but_no_runtime"].append({
-                                "date":date_str,"home":home_raw,"away":away_raw,"game_id":g["g_id"]
-                            })
-                    else:
-                        counts["matched_with_runtime"] += 1
-                        if len(samples["matched_with_runtime"]) < 6:
-                            samples["matched_with_runtime"].append({
-                                "date":date_str,"home":home_raw,"away":away_raw,"runtime_min":rt
-                            })
-                except Exception as e:
-                    counts["errors"] += 1
-                    if len(samples["errors"]) < 6:
-                        samples["errors"].append({"date":date_str,"error":f"{type(e).__name__}: {str(e)}"})
-    finally:
-        try: d.quit()
-        except: pass
-
-    return jsonify({
-        "team_input": team, "team_norm": my, "rival_input": rival, "rival_norm": rival_norm,
-        "days_scanned": days,
-        "counts": counts,
-        "sample_rows": samples
-    })
 
 if __name__ == "__main__":
     app.run(debug=True, port=5002, use_reloader=False)
