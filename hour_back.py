@@ -394,5 +394,232 @@ def cache_clear():
                 return jsonify({"ok": False, "error": str(e)}), 500
     return jsonify({"ok": True, "deleted": deleted})
 
+# =========================
+# 🔍 DEBUG ENDPOINTS
+# - 운영 출력은 바꾸지 않고, 왜 "과거 경기 데이터 없음"이 되는지 단계별로 보여준다
+# =========================
+
+def _norm(name: str) -> str:
+    # 현재 파일에 normalize_team이 있으면 그걸 쓰고, 없으면 원문 반환
+    try:
+        return normalize_team(name)
+    except NameError:
+        return (name or "").strip()
+
+@app.route("/debug/config")
+def debug_config():
+    return jsonify({
+        "START_DATE": START_DATE,
+        "MAX_DAYS": MAX_DAYS,
+        "CACHE_DIR": CACHE_DIR,
+    })
+
+@app.route("/debug/date")
+def debug_date():
+    """
+    특정 날짜의 스케줄 카드에서 나온 팀명/정규화/게임ID를 보여줌.
+    예) /debug/date?date=20250828
+    """
+    date_str = (request.args.get("date") or "").strip()
+    if not (re.fullmatch(r"\d{8}", date_str)):
+        return jsonify({"error": "date=YYYYMMDD 필요"}), 400
+
+    d = make_driver()
+    try:
+        games = get_games_for_date(d, date_str)
+    finally:
+        try: d.quit()
+        except: pass
+
+    items = []
+    for g in games:
+        items.append({
+            "home_raw": g.get("home"), "away_raw": g.get("away"),
+            "home_norm": _norm(g.get("home")), "away_norm": _norm(g.get("away")),
+            "game_id": g.get("g_id"), "game_date": g.get("g_dt")
+        })
+    return jsonify({"date": date_str, "games": items, "count": len(items)})
+
+@app.route("/debug/today")
+def debug_today():
+    """
+    오늘 페이지에서 파싱된 카드, 정규화, 그리고 '오늘 상대(rivals_today)' 결과를 그대로 보여줌.
+    예) /debug/today?team=KIA
+    """
+    team = (request.args.get("team") or "").strip()
+    if not team:
+        return jsonify({"error":"team 파라미터 필요"}), 400
+
+    d = make_driver()
+    try:
+        cards = get_today_cards(d)
+        parsed = []
+        for li in cards:
+            info = extract_match_info_from_card(li)
+            parsed.append({
+                "home_raw": info.get("home"),
+                "away_raw": info.get("away"),
+                "home_norm": _norm(info.get("home")),
+                "away_norm": _norm(info.get("away")),
+                "g_id": info.get("g_id"),
+                "g_dt": info.get("g_dt")
+            })
+        # compute rivals_today 그대로 재현
+        my = _norm(team)
+        rivals = set()
+        for it in parsed:
+            if my in {it["home_norm"], it["away_norm"]}:
+                rival = it["home_norm"] if it["away_norm"] == my else it["away_norm"]
+                rivals.add(rival)
+    finally:
+        try: d.quit()
+        except: pass
+
+    return jsonify({
+        "team_input": team,
+        "team_norm": my,
+        "rivals_today": sorted(list(rivals)),
+        "today_cards": parsed
+    })
+
+@app.route("/debug/review_runtime")
+def debug_review_runtime():
+    """
+    특정 gameId/gameDate에서 리뷰 탭 런타임 텍스트/파싱결과를 그대로 보여줌.
+    예) /debug/review_runtime?gameId=20240912LKKT0&gameDate=20250828
+    """
+    game_id = (request.args.get("gameId") or "").strip()
+    game_date = (request.args.get("gameDate") or "").strip()
+    if not game_id or not re.fullmatch(r"\d{8}", game_date or ""):
+        return jsonify({"error":"gameId, gameDate=YYYYMMDD 필요"}), 400
+
+    d = make_driver()
+    try:
+        # open_review_and_get_runtime 로직을 최대한 그대로, 텍스트도 노출
+        wait = WebDriverWait(d, 15)
+        base = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameId={game_id}&gameDate={game_date}"
+        d.get(base)
+        runtime_text = None
+        try:
+            review_tab = wait.until(EC.element_to_be_clickable((By.XPATH, "//a[contains(text(), '리뷰')]")))
+            review_tab.click()
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.record-etc")))
+        except Exception:
+            d.get(base + "&section=REVIEW")
+            try:
+                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, "div.record-etc")))
+            except Exception:
+                pass
+        time.sleep(0.5)
+        soup = BeautifulSoup(d.page_source, "html.parser")
+        record_etc = soup.select_one("div.record-etc")
+        if record_etc:
+            span = record_etc.select_one("span#txtRunTime")
+            if span:
+                runtime_text = span.get_text(strip=True)
+        parsed_min = None
+        if runtime_text:
+            m = re.search(r"(\d{1,2})\s*[:：]\s*(\d{2})", runtime_text)
+            if not m:
+                m = re.search(r"(\d{1,2})\s*시간\s*(\d{1,2})\s*분", runtime_text)
+            if m:
+                h, mn = int(m.group(1)), int(m.group(2))
+                parsed_min = h*60 + mn
+    finally:
+        try: d.quit()
+        except: pass
+
+    return jsonify({
+        "game_id": game_id, "game_date": game_date,
+        "runtime_text": runtime_text, "parsed_minutes": parsed_min
+    })
+
+@app.route("/debug/history_reasons")
+def debug_history_reasons():
+    """
+    수집 루프 전체에서 '왜 제외되었는지'를 이유별로 카운트/샘플 제공.
+    rival 필터를 주거나(상대 지정), 안 주면 전체 평균 기준으로 동작.
+    예) /debug/history_reasons?team=KIA&days=60
+        /debug/history_reasons?team=KIA&rival=KT&days=60
+    """
+    team = (request.args.get("team") or "").strip()
+    if not team:
+        return jsonify({"error":"team 파라미터 필요"}), 400
+    rival = (request.args.get("rival") or "").strip() or None
+    try:
+        days = int(request.args.get("days","60"))
+    except:
+        days = 60
+
+    my = _norm(team)
+    rival_norm = _norm(rival) if rival else None
+
+    d = make_driver()
+    try:
+        end = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
+        start = (datetime.today() - timedelta(days=days)).strftime("%Y%m%d")
+        dr = pd.date_range(start=start, end=end)
+
+        counts = {
+            "not_my_team": 0,
+            "my_team_but_rival_mismatch": 0,
+            "matched_but_no_runtime": 0,
+            "matched_with_runtime": 0,
+            "errors": 0
+        }
+        samples = {k: [] for k in counts}
+
+        for dt in dr:
+            date_str = dt.strftime("%Y%m%d")
+            games = get_games_for_date(d, date_str)
+            for g in games:
+                try:
+                    home_raw, away_raw = g["home"], g["away"]
+                    home, away = _norm(home_raw), _norm(away_raw)
+
+                    if my not in {home, away}:
+                        counts["not_my_team"] += 1
+                        if len(samples["not_my_team"]) < 6:
+                            samples["not_my_team"].append({"date":date_str,"home":home_raw,"away":away_raw})
+                        continue
+
+                    opp = home if away == my else away
+                    if rival_norm and opp != rival_norm:
+                        counts["my_team_but_rival_mismatch"] += 1
+                        if len(samples["my_team_but_rival_mismatch"]) < 6:
+                            samples["my_team_but_rival_mismatch"].append({
+                                "date":date_str,"home":home_raw,"away":away_raw,"opponent_norm":opp
+                            })
+                        continue
+
+                    rt = open_review_and_get_runtime(d, g["g_id"], g["g_dt"])
+                    if rt is None:
+                        counts["matched_but_no_runtime"] += 1
+                        if len(samples["matched_but_no_runtime"]) < 6:
+                            samples["matched_but_no_runtime"].append({
+                                "date":date_str,"home":home_raw,"away":away_raw,"game_id":g["g_id"]
+                            })
+                    else:
+                        counts["matched_with_runtime"] += 1
+                        if len(samples["matched_with_runtime"]) < 6:
+                            samples["matched_with_runtime"].append({
+                                "date":date_str,"home":home_raw,"away":away_raw,"runtime_min":rt
+                            })
+                except Exception as e:
+                    counts["errors"] += 1
+                    if len(samples["errors"]) < 6:
+                        samples["errors"].append({"date":date_str,"error":f"{type(e).__name__}: {str(e)}"})
+    finally:
+        try: d.quit()
+        except: pass
+
+    return jsonify({
+        "team_input": team, "team_norm": my, "rival_input": rival, "rival_norm": rival_norm,
+        "days_scanned": days,
+        "counts": counts,
+        "sample_rows": samples
+    })
+
+
 if __name__ == "__main__":
     app.run(debug=True, port=5002, use_reloader=False)
