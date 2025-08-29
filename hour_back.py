@@ -1,5 +1,5 @@
-from flask import Flask, request, render_template, jsonify
-import os, json, time, re
+from flask import Flask, request, render_template, jsonify, make_response
+import os, json, time, re, io, zipfile
 from datetime import datetime, timedelta
 import pandas as pd
 
@@ -13,18 +13,29 @@ from bs4 import BeautifulSoup
 app = Flask(__name__)
 
 # ====== 기준값 / 설정 ======
-top30 = 168
+top30   = 168
 avg_ref = 182.7
-bottom70 = 194
+bottom70= 194
 START_DATE = os.environ.get("START_DATE", "2025-03-22")
 
-# ====== 캐시 (최소 필드만) ======
-CACHE_DIR = os.environ.get("CACHE_DIR", "/data")
-os.makedirs(CACHE_DIR, exist_ok=True)
-RUNTIME_CACHE_FILE  = os.path.join(CACHE_DIR, "runtime_cache.json")   # key -> {"runtime_min": int}
-SCHEDULE_CACHE_FILE = os.path.join(CACHE_DIR, "schedule_index.json") # date -> [{home,away,g_id,g_dt}]
+# ====== 디렉토리 경로 (sentiment 패턴) ======
+BASE_DIR   = os.path.dirname(os.path.abspath(__file__))
+# 깃에 커밋할 수 있는 "씨드" 저장소 (read-only처럼 취급, 수동 커밋/배포)
+DATA_DIR   = os.environ.get("DATA_DIR", os.path.join(BASE_DIR, "data", "seed"))
+# 런타임 캐시 저장소 (컨테이너 재시작까지 유지, 재배포시 초기화될 수 있음)
+CACHE_DIR  = os.environ.get("CACHE_DIR", os.path.join(BASE_DIR, "data", "runtime"))
 
-def _load_json(path, default):
+os.makedirs(DATA_DIR, exist_ok=True)
+os.makedirs(CACHE_DIR, exist_ok=True)
+
+RUNTIME_CACHE_FILE  = os.path.join(CACHE_DIR, "runtime_cache.json")
+SCHEDULE_CACHE_FILE = os.path.join(CACHE_DIR, "schedule_index.json")
+
+SEED_RUNTIME_FILE   = os.path.join(DATA_DIR, "runtime_cache.seed.json")
+SEED_SCHEDULE_FILE  = os.path.join(DATA_DIR, "schedule_index.seed.json")
+
+# ====== JSON 유틸 ======
+def _safe_json_load(path, default):
     if os.path.exists(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -33,24 +44,53 @@ def _load_json(path, default):
             return default
     return default
 
-def _save_json(path, obj):
+def _safe_json_save(path, obj):
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
-def get_runtime_cache():  return _load_json(RUNTIME_CACHE_FILE, {})
-def get_schedule_cache(): return _load_json(SCHEDULE_CACHE_FILE, {})
+def _file_info(path):
+    if not os.path.exists(path):
+        return {"exists": False}
+    st = os.stat(path)
+    return {
+        "exists": True,
+        "size_bytes": st.st_size,
+        "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
+        "path": os.path.abspath(path),
+    }
+
+# ====== 씨드 → 런타임 캐시 초기화 ======
+def _warm_cache_from_seed_if_empty():
+    # runtime 파일이 없을 때만 seed에서 복원
+    if not os.path.exists(RUNTIME_CACHE_FILE):
+        seed = _safe_json_load(SEED_RUNTIME_FILE, {})
+        if seed:
+            _safe_json_save(RUNTIME_CACHE_FILE, seed)
+    if not os.path.exists(SCHEDULE_CACHE_FILE):
+        seed = _safe_json_load(SEED_SCHEDULE_FILE, {})
+        if seed:
+            _safe_json_save(SCHEDULE_CACHE_FILE, seed)
+
+# 앱 기동 시 1회 시도
+_warm_cache_from_seed_if_empty()
+
+def get_runtime_cache():
+    return _safe_json_load(RUNTIME_CACHE_FILE, {})
+
+def get_schedule_cache():
+    return _safe_json_load(SCHEDULE_CACHE_FILE, {})
 
 def set_runtime_cache(key, runtime_min):
     cache = get_runtime_cache()
     cache[key] = {"runtime_min": runtime_min}
-    _save_json(RUNTIME_CACHE_FILE, cache)
+    _safe_json_save(RUNTIME_CACHE_FILE, cache)
 
 def set_schedule_cache_for_date(date_str, games_minimal_list):
     cache = get_schedule_cache()
     cache[date_str] = games_minimal_list
-    _save_json(SCHEDULE_CACHE_FILE, cache)
+    _safe_json_save(SCHEDULE_CACHE_FILE, cache)
 
 def make_runtime_key(game_id: str, game_date: str) -> str:
     return f"{game_id}_{game_date}"
@@ -117,7 +157,7 @@ def find_today_matches_for_team(driver, my_team):
     for li in cards:
         info = extract_match_info_from_card(li)
         h, a = info["home"], info["away"]
-        if not (h and a): 
+        if not (h and a):
             continue
         if my_team in {h, a}:
             rival = h if a == my_team else a
@@ -143,11 +183,13 @@ def get_games_for_date(driver, date_str):
     time.sleep(0.3)
     soup = BeautifulSoup(driver.page_source, "html.parser")
     cards = soup.select("li.game-cont") or soup.select("li[class*='game-cont']")
+
     out = []
     for li in cards:
         info = extract_match_info_from_card(li)
         if all([info.get("home"), info.get("away"), info.get("g_id"), info.get("g_dt")]):
             out.append({"home": info["home"], "away": info["away"], "g_id": info["g_id"], "g_dt": info["g_dt"]})
+
     set_schedule_cache_for_date(date_str, out)
     return out
 
@@ -194,7 +236,7 @@ def open_review_and_get_runtime(driver, game_id, game_date):
         set_runtime_cache(key, run_time_min)
     return run_time_min
 
-# ====== 평균 계산 (캡 제거: START_DATE ~ 어제까지 전체) ======
+# ====== 평균 계산 (START_DATE ~ 어제, 전체 범위) ======
 def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
     d = make_driver()
     try:
@@ -285,25 +327,21 @@ def hour_index():
     except Exception as e:
         return f"오류가 발생했습니다: {type(e).__name__}: {str(e)}", 200
 
-# ====== 헬스/캐시 ======
-def _file_info(path):
-    if not os.path.exists(path):
-        return {"exists": False}
-    st = os.stat(path)
-    return {"exists": True, "size_bytes": st.st_size,
-            "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
-            "path": os.path.abspath(path)}
-
-@app.route("/healthz")        
-def healthz(): 
+# ====== 헬스/캐시 유틸 ======
+@app.route("/healthz")
+def healthz():
     return "ok", 200
 
 @app.route("/cache/status")
 def cache_status():
     return jsonify({
+        "BASE_DIR": os.path.abspath(BASE_DIR),
+        "DATA_DIR": os.path.abspath(DATA_DIR),
         "CACHE_DIR": os.path.abspath(CACHE_DIR),
         "runtime_cache": _file_info(RUNTIME_CACHE_FILE),
         "schedule_cache": _file_info(SCHEDULE_CACHE_FILE),
+        "seed_runtime": _file_info(SEED_RUNTIME_FILE),
+        "seed_schedule": _file_info(SEED_SCHEDULE_FILE),
     })
 
 @app.route("/cache/clear", methods=["POST"])
@@ -315,7 +353,58 @@ def cache_clear():
                 os.remove(p); deleted.append(os.path.basename(p))
             except Exception as e:
                 return jsonify({"ok": False, "error": str(e)}), 500
+    # 클리어 후, 씨드로 재워밍
+    _warm_cache_from_seed_if_empty()
     return jsonify({"ok": True, "deleted": deleted})
+
+# ====== 씨드 Export/Import (무료 운영 패턴) ======
+@app.route("/cache/export")
+def cache_export():
+    """
+    런타임 캐시 2개 파일을 zip으로 내려줌.
+    이 zip을 풀어 data/seed/ 에 넣고 커밋하면 재배포 뒤에도 즉시 로드됨.
+    """
+    runtime = _safe_json_load(RUNTIME_CACHE_FILE, {})
+    schedule= _safe_json_load(SCHEDULE_CACHE_FILE, {})
+    mem = io.BytesIO()
+    with zipfile.ZipFile(mem, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("runtime_cache.seed.json", json.dumps(runtime, ensure_ascii=False, indent=2))
+        z.writestr("schedule_index.seed.json", json.dumps(schedule, ensure_ascii=False, indent=2))
+    mem.seek(0)
+    resp = make_response(mem.read())
+    resp.headers["Content-Type"] = "application/zip"
+    resp.headers["Content-Disposition"] = "attachment; filename=hour_cache_seed.zip"
+    return resp
+
+@app.route("/cache/import", methods=["POST"])
+def cache_import():
+    """
+    JSON body:
+    {
+      "runtime": { ... },     # optional
+      "schedule": { ... }     # optional
+    }
+    - 런타임 캐시에 반영 + 씨드 파일도 갱신(원하면 레포에 반영해 커밋)
+    """
+    try:
+        payload = request.get_json(force=True, silent=False)
+    except Exception:
+        return jsonify({"ok": False, "error": "invalid json"}), 400
+
+    applied = {}
+    if isinstance(payload, dict) and "runtime" in payload:
+        _safe_json_save(RUNTIME_CACHE_FILE, payload["runtime"])
+        _safe_json_save(SEED_RUNTIME_FILE, payload["runtime"])
+        applied["runtime"] = True
+    if isinstance(payload, dict) and "schedule" in payload:
+        _safe_json_save(SCHEDULE_CACHE_FILE, payload["schedule"])
+        _safe_json_save(SEED_SCHEDULE_FILE, payload["schedule"])
+        applied["schedule"] = True
+
+    if not applied:
+        return jsonify({"ok": False, "error": "no 'runtime' or 'schedule' in body"}), 400
+
+    return jsonify({"ok": True, "applied": applied})
 
 if __name__ == "__main__":
     app.run(debug=True, port=5002, use_reloader=False)
