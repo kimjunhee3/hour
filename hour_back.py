@@ -410,3 +410,106 @@ def cache_clear():
 
 if __name__ == "__main__":
     app.run(debug=True, port=5002, use_reloader=False)
+
+
+# =========[ DEBUG HELPERS: 팀명 정규화 도우미 ]=========
+_ALIAS_MAP = {
+    "SSG": ["SSG", "SSG랜더스", "SSG Landers", "랜더스"],
+    "KIA": ["KIA", "KIA타이거즈", "기아", "KIA Tigers", "타이거즈"],
+    "KT":  ["KT", "KT위즈", "kt", "케이티", "KT Wiz", "위즈"],
+    "LG":  ["LG", "LG트윈스", "엘지", "트윈스"],
+    "두산": ["두산", "두산베어스", "베어스"],
+    "롯데": ["롯데", "롯데자이언츠", "자이언츠"],
+    "삼성": ["삼성", "삼성라이온즈", "라이온즈"],
+    "NC":  ["NC", "NC다이노스", "엔씨", "다이노스"],
+    "키움": ["키움", "키움히어로즈", "히어로즈"],
+    "한화": ["한화", "한화이글스", "이글스"],
+}
+_ALIAS_LOOKUP = {}
+for canon, aliases in _ALIAS_MAP.items():
+    for a in aliases:
+        _ALIAS_LOOKUP[a.strip().lower()] = canon
+
+def normalize_team(name: str) -> str | None:
+    if not name:
+        return None
+    key = name.strip().lower()
+    if key in _ALIAS_LOOKUP:
+        return _ALIAS_LOOKUP[key]
+    key2 = re.sub(r"\s+", "", key)
+    return _ALIAS_LOOKUP.get(key2, name.strip())
+
+# =========[ DEBUG 1: 최근 N일 원문 팀명 목록 ]=========
+@app.route("/debug/aliases")
+def debug_aliases():
+    try:
+        days = int(request.args.get("days", "60"))
+    except:
+        days = 60
+    d = make_driver()
+    today_minus_1 = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
+    dr = pd.date_range(start=(datetime.today()-timedelta(days=days)).strftime("%Y%m%d"),
+                       end=today_minus_1)
+    names = set()
+    for dt in dr:
+        date_str = dt.strftime("%Y%m%d")
+        games = get_games_for_date(d, date_str)
+        for g in games:
+            if g.get("home"): names.add(g["home"])
+            if g.get("away"): names.add(g["away"])
+    try: d.quit()
+    except: pass
+    return jsonify(sorted(list(names)))
+
+# =========[ DEBUG 2: 특정 팀 매칭 전/후 비교 ]=========
+@app.route("/debug/scan")
+def debug_scan():
+    team = (request.args.get("team") or "").strip()
+    if not team:
+        return jsonify({"error":"team 파라미터 필요 (예: ?team=KIA)"}), 400
+
+    d = make_driver()
+    today_minus_1 = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
+    dr = pd.date_range(start=(datetime.today()-timedelta(days=60)).strftime("%Y%m%d"),
+                       end=today_minus_1)
+
+    team_norm = normalize_team(team)
+    before_hits, after_hits, diffs = 0, 0, []  # diffs: 정규화로만 매칭되는 케이스 기록
+
+    for dt in dr:
+        date_str = dt.strftime("%Y%m%d")
+        games = get_games_for_date(d, date_str)
+        for g in games:
+            home_raw, away_raw = g["home"], g["away"]
+            home_norm, away_norm = normalize_team(home_raw), normalize_team(away_raw)
+
+            before = (team == home_raw) or (team == away_raw)           # 완전일치
+            after  = (team_norm == home_norm) or (team_norm == away_norm) # 정규화 일치
+
+            if before: before_hits += 1
+            if after:  after_hits  += 1
+            if (not before) and after:
+                diffs.append({
+                    "date": date_str,
+                    "home_raw": home_raw, "away_raw": away_raw,
+                    "home_norm": home_norm, "away_norm": away_norm
+                })
+
+    try: d.quit()
+    except: pass
+
+    return jsonify({
+        "team_input": team, "team_norm": team_norm,
+        "before_hits": before_hits, "after_hits": after_hits,
+        "diff_samples": diffs[:12],  # 정규화로만 잡히는 샘플 일부
+    })
+
+# =========[ DEBUG 3: 상대 필터 무시한 평균 (= 루트 원인 분기) ]=========
+@app.route("/debug/avg_any_rival")
+def debug_avg_any_rival():
+    team = (request.args.get("team") or "").strip()
+    if not team:
+        return jsonify({"error":"team 파라미터 필요 (예: ?team=KIA)"}), 400
+    avg_time, runs = collect_history_avg_runtime(team, rival_set=None)
+    return jsonify({"team": team, "avg_time": avg_time, "samples": len(runs)})
+
