@@ -24,7 +24,6 @@ START_DATE = os.environ.get("START_DATE", "2025-03-22")
 MAX_DAYS   = int(os.environ.get("MAX_DAYS", "60"))
 
 # ====== 캐시 디렉토리 ======
-# 영구 유지 원하면 Railway에서 /data 볼륨 마운트 권장 (CACHE_DIR=/data)
 CACHE_DIR = os.environ.get("CACHE_DIR", "/data")
 os.makedirs(CACHE_DIR, exist_ok=True)
 RUNTIME_CACHE_FILE  = os.path.join(CACHE_DIR, "runtime_cache.json")
@@ -78,8 +77,6 @@ _ALIAS_MAP = {
     "키움": ["키움", "키움히어로즈", "히어로즈"],
     "한화": ["한화", "한화이글스", "이글스"],
 }
-
-# 역색인: alias -> canonical
 _ALIAS_LOOKUP = {}
 for canon, aliases in _ALIAS_MAP.items():
     for a in aliases:
@@ -89,19 +86,15 @@ def normalize_team(name: str) -> str | None:
     if not name:
         return None
     key = name.strip().lower()
-    # 완전 매칭
     if key in _ALIAS_LOOKUP:
         return _ALIAS_LOOKUP[key]
-    # 안전장치: 영문 대소문자/공백 변형 흡수
     key2 = re.sub(r"\s+", "", key)
-    return _ALIAS_LOOKUP.get(key2, name.strip())  # 미등록이면 원문을 그대로 반환 (최후수단)
+    return _ALIAS_LOOKUP.get(key2, name.strip())
 
-# ====== Selenium 드라이버 (Chrome + Selenium Manager) ======
+# ====== Selenium 드라이버 ======
 def make_driver():
     options = Options()
-    chrome_bin = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
-    options.binary_location = chrome_bin
-
+    options.binary_location = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
     options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -109,8 +102,7 @@ def make_driver():
     options.add_argument("--window-size=1280,1200")
     options.add_argument("--lang=ko-KR")
     options.add_argument(
-        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
+        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     )
     options.page_load_strategy = "eager"
     return webdriver.Chrome(options=options)
@@ -163,13 +155,12 @@ def find_today_matches_for_team(driver, my_team):
     results = []
     for li in cards:
         info = extract_match_info_from_card(li)
-        home, away = info["home"], info["away"]
-        if not (home and away): 
+        h, a = info["home"], info["away"]
+        if not (h and a):
             continue
-        if my_canon in {normalize_team(home), normalize_team(away)}:
-            # rival은 보기 좋게 '정규화된 표시용'으로 세팅
-            rival_raw = home if normalize_team(away) == my_canon else away
-            info["rival"] = normalize_team(rival_raw) or rival_raw
+        if my_canon in {normalize_team(h), normalize_team(a)}:
+            rival_raw = h if normalize_team(a) == my_canon else a
+            info["rival"] = normalize_team(rival_raw) or rival_raw  # <-- rival도 정규화
             results.append(info)
     return results
 
@@ -238,6 +229,8 @@ def open_review_and_get_runtime(driver, game_id, game_date):
         if span:
             runtime = span.get_text(strip=True)
             m = re.search(r"(\d{1,2})\s*[:：]\s*(\d{2})", runtime)
+            if not m:
+                m = re.search(r"(\d{1,2})\s*시간\s*(\d{1,2})\s*분", runtime)
             if m:
                 h, mnt = int(m.group(1)), int(m.group(2))
                 run_time_min = h * 60 + mnt
@@ -261,13 +254,11 @@ def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
     run_times = []
     for date in date_list:
         games = get_games_for_date(d, date)
-        if not games: 
+        if not games:
             continue
-
         for info in games:
             home_raw, away_raw = info["home"], info["away"]
-            home = normalize_team(home_raw)
-            away = normalize_team(away_raw)
+            home, away = normalize_team(home_raw), normalize_team(away_raw)
 
             if my_canon in {home, away}:
                 opponent = home if away == my_canon else away
@@ -291,13 +282,6 @@ def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
 
 # ====== 공통 처리 함수 ======
 def compute_for_team(team_name):
-    """팀명 입력받아 오늘 상대/평균시간 계산 후 렌더링용 컨텍스트 반환."""
-    selected_team = team_name
-    result = None
-    avg_time = None
-    css_class = ""
-    msg = ""
-
     if not team_name:
         return dict(
             result="팀을 선택해주세요.",
@@ -319,15 +303,17 @@ def compute_for_team(team_name):
             selected_team=team_name, top30=top30, avg_ref=avg_ref, bottom70=bottom70
         )
 
-    rivals_today = {m.get("rival") for m in today_matches if m.get("rival")}
+    # ✅ rival을 '정규화된 이름'으로 수집 (핵심 수정)
+    rivals_today = {normalize_team(m["rival"]) for m in today_matches if m.get("rival")}
     rivals_str = ", ".join(sorted(rivals_today))
-    result = f"오늘 {team_name}의 상대팀은 {rivals_str}입니다."
 
     try:
-        avg_time, _ = collect_history_avg_runtime(team_name, rivals_today)
+        # ✅ my_team도 정규화된 값으로 전달
+        avg_time, _ = collect_history_avg_runtime(normalize_team(team_name), rivals_today)
     except Exception:
         avg_time = None
 
+    css_class = ""; msg = ""
     if avg_time is not None:
         if avg_time < top30:
             css_class, msg = "fast", "빠르게 끝나는 경기입니다"
@@ -346,7 +332,7 @@ def compute_for_team(team_name):
         selected_team=team_name, top30=top30, avg_ref=avg_ref, bottom70=bottom70
     )
 
-# ====== 라우트: GET/POST 모두 팀 파라미터 지원 ======
+# ====== 라우트 ======
 @app.route("/", methods=["GET", "POST"])
 @app.route("/hour", methods=["GET", "POST"])
 def hour_index():
@@ -360,7 +346,7 @@ def hour_index():
     except Exception as e:
         return f"오류가 발생했습니다: {type(e).__name__}: {str(e)}", 200
 
-# ====== 진단 엔드포인트 ======
+# ====== 진단 ======
 def _file_info(path):
     if not os.path.exists(path):
         return {"exists": False}
@@ -410,106 +396,3 @@ def cache_clear():
 
 if __name__ == "__main__":
     app.run(debug=True, port=5002, use_reloader=False)
-
-
-# =========[ DEBUG HELPERS: 팀명 정규화 도우미 ]=========
-_ALIAS_MAP = {
-    "SSG": ["SSG", "SSG랜더스", "SSG Landers", "랜더스"],
-    "KIA": ["KIA", "KIA타이거즈", "기아", "KIA Tigers", "타이거즈"],
-    "KT":  ["KT", "KT위즈", "kt", "케이티", "KT Wiz", "위즈"],
-    "LG":  ["LG", "LG트윈스", "엘지", "트윈스"],
-    "두산": ["두산", "두산베어스", "베어스"],
-    "롯데": ["롯데", "롯데자이언츠", "자이언츠"],
-    "삼성": ["삼성", "삼성라이온즈", "라이온즈"],
-    "NC":  ["NC", "NC다이노스", "엔씨", "다이노스"],
-    "키움": ["키움", "키움히어로즈", "히어로즈"],
-    "한화": ["한화", "한화이글스", "이글스"],
-}
-_ALIAS_LOOKUP = {}
-for canon, aliases in _ALIAS_MAP.items():
-    for a in aliases:
-        _ALIAS_LOOKUP[a.strip().lower()] = canon
-
-def normalize_team(name: str) -> str | None:
-    if not name:
-        return None
-    key = name.strip().lower()
-    if key in _ALIAS_LOOKUP:
-        return _ALIAS_LOOKUP[key]
-    key2 = re.sub(r"\s+", "", key)
-    return _ALIAS_LOOKUP.get(key2, name.strip())
-
-# =========[ DEBUG 1: 최근 N일 원문 팀명 목록 ]=========
-@app.route("/debug/aliases")
-def debug_aliases():
-    try:
-        days = int(request.args.get("days", "60"))
-    except:
-        days = 60
-    d = make_driver()
-    today_minus_1 = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
-    dr = pd.date_range(start=(datetime.today()-timedelta(days=days)).strftime("%Y%m%d"),
-                       end=today_minus_1)
-    names = set()
-    for dt in dr:
-        date_str = dt.strftime("%Y%m%d")
-        games = get_games_for_date(d, date_str)
-        for g in games:
-            if g.get("home"): names.add(g["home"])
-            if g.get("away"): names.add(g["away"])
-    try: d.quit()
-    except: pass
-    return jsonify(sorted(list(names)))
-
-# =========[ DEBUG 2: 특정 팀 매칭 전/후 비교 ]=========
-@app.route("/debug/scan")
-def debug_scan():
-    team = (request.args.get("team") or "").strip()
-    if not team:
-        return jsonify({"error":"team 파라미터 필요 (예: ?team=KIA)"}), 400
-
-    d = make_driver()
-    today_minus_1 = (datetime.today() - timedelta(days=1)).strftime("%Y%m%d")
-    dr = pd.date_range(start=(datetime.today()-timedelta(days=60)).strftime("%Y%m%d"),
-                       end=today_minus_1)
-
-    team_norm = normalize_team(team)
-    before_hits, after_hits, diffs = 0, 0, []  # diffs: 정규화로만 매칭되는 케이스 기록
-
-    for dt in dr:
-        date_str = dt.strftime("%Y%m%d")
-        games = get_games_for_date(d, date_str)
-        for g in games:
-            home_raw, away_raw = g["home"], g["away"]
-            home_norm, away_norm = normalize_team(home_raw), normalize_team(away_raw)
-
-            before = (team == home_raw) or (team == away_raw)           # 완전일치
-            after  = (team_norm == home_norm) or (team_norm == away_norm) # 정규화 일치
-
-            if before: before_hits += 1
-            if after:  after_hits  += 1
-            if (not before) and after:
-                diffs.append({
-                    "date": date_str,
-                    "home_raw": home_raw, "away_raw": away_raw,
-                    "home_norm": home_norm, "away_norm": away_norm
-                })
-
-    try: d.quit()
-    except: pass
-
-    return jsonify({
-        "team_input": team, "team_norm": team_norm,
-        "before_hits": before_hits, "after_hits": after_hits,
-        "diff_samples": diffs[:12],  # 정규화로만 잡히는 샘플 일부
-    })
-
-# =========[ DEBUG 3: 상대 필터 무시한 평균 (= 루트 원인 분기) ]=========
-@app.route("/debug/avg_any_rival")
-def debug_avg_any_rival():
-    team = (request.args.get("team") or "").strip()
-    if not team:
-        return jsonify({"error":"team 파라미터 필요 (예: ?team=KIA)"}), 400
-    avg_time, runs = collect_history_avg_runtime(team, rival_set=None)
-    return jsonify({"team": team, "avg_time": avg_time, "samples": len(runs)})
-
