@@ -1,3 +1,4 @@
+#hour_back.py
 from flask import Flask, request, render_template, jsonify
 from flask_cors import CORS
 import os, json, time, re
@@ -64,10 +65,40 @@ def set_schedule_cache_for_date(date_str, games_minimal_list):
 def make_runtime_key(game_id: str, game_date: str) -> str:
     return f"{game_id}_{game_date}"
 
+# ====== 팀명 정규화 ======
+_ALIAS_MAP = {
+    "SSG": ["SSG", "SSG랜더스", "SSG Landers", "랜더스"],
+    "KIA": ["KIA", "KIA타이거즈", "기아", "KIA Tigers", "타이거즈"],
+    "KT":  ["KT", "KT위즈", "kt", "케이티", "KT Wiz", "위즈"],
+    "LG":  ["LG", "LG트윈스", "엘지", "트윈스"],
+    "두산": ["두산", "두산베어스", "베어스"],
+    "롯데": ["롯데", "롯데자이언츠", "자이언츠"],
+    "삼성": ["삼성", "삼성라이온즈", "라이온즈"],
+    "NC":  ["NC", "NC다이노스", "엔씨", "다이노스"],
+    "키움": ["키움", "키움히어로즈", "히어로즈"],
+    "한화": ["한화", "한화이글스", "이글스"],
+}
+
+# 역색인: alias -> canonical
+_ALIAS_LOOKUP = {}
+for canon, aliases in _ALIAS_MAP.items():
+    for a in aliases:
+        _ALIAS_LOOKUP[a.strip().lower()] = canon
+
+def normalize_team(name: str) -> str | None:
+    if not name:
+        return None
+    key = name.strip().lower()
+    # 완전 매칭
+    if key in _ALIAS_LOOKUP:
+        return _ALIAS_LOOKUP[key]
+    # 안전장치: 영문 대소문자/공백 변형 흡수
+    key2 = re.sub(r"\s+", "", key)
+    return _ALIAS_LOOKUP.get(key2, name.strip())  # 미등록이면 원문을 그대로 반환 (최후수단)
+
 # ====== Selenium 드라이버 (Chrome + Selenium Manager) ======
 def make_driver():
     options = Options()
-    # Google Chrome 바이너리 (Dockerfile에서 google-chrome-stable 설치)
     chrome_bin = os.environ.get("CHROME_BIN", "/usr/bin/google-chrome")
     options.binary_location = chrome_bin
 
@@ -82,13 +113,11 @@ def make_driver():
         "(KHTML, like Gecko) Chrome/126.0 Safari/537.36"
     )
     options.page_load_strategy = "eager"
-
-    # 드라이버 경로 지정하지 않음 → Selenium Manager가 자동 매칭
     return webdriver.Chrome(options=options)
 
 # ====== 크롤링 유틸 ======
 def get_today_cards(driver):
-    wait = WebDriverWait(driver, 15)
+    wait = WebDriverWait(driver, 20)
     today = datetime.today().strftime("%Y%m%d")
     url = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={today}"
     driver.get(url)
@@ -129,15 +158,18 @@ def extract_match_info_from_card(card_li):
     return {"home": home_nm, "away": away_nm, "g_id": g_id, "g_dt": g_dt}
 
 def find_today_matches_for_team(driver, my_team):
+    my_canon = normalize_team(my_team)
     cards = get_today_cards(driver)
     results = []
     for li in cards:
         info = extract_match_info_from_card(li)
         home, away = info["home"], info["away"]
-        if not (home and away): continue
-        if my_team in {home, away}:
-            rival = home if away == my_team else away
-            info["rival"] = rival
+        if not (home and away): 
+            continue
+        if my_canon in {normalize_team(home), normalize_team(away)}:
+            # rival은 보기 좋게 '정규화된 표시용'으로 세팅
+            rival_raw = home if normalize_team(away) == my_canon else away
+            info["rival"] = normalize_team(rival_raw) or rival_raw
             results.append(info)
     return results
 
@@ -146,7 +178,7 @@ def get_games_for_date(driver, date_str):
     if date_str in cache:
         return cache[date_str]
 
-    wait = WebDriverWait(driver, 15)
+    wait = WebDriverWait(driver, 20)
     url = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameDate={date_str}"
     driver.get(url)
     try:
@@ -183,7 +215,7 @@ def open_review_and_get_runtime(driver, game_id, game_date):
         if hit and isinstance(hit, dict) and "runtime_min" in hit:
             return hit["runtime_min"]
 
-    wait = WebDriverWait(driver, 12)
+    wait = WebDriverWait(driver, 15)
     base = f"https://www.koreabaseball.com/Schedule/GameCenter/Main.aspx?gameId={game_id}&gameDate={game_date}"
     driver.get(base)
     try:
@@ -223,19 +255,26 @@ def collect_history_avg_runtime(my_team, rival_set, start_date=START_DATE):
         dr = dr[-MAX_DAYS:]
     date_list = [d.strftime("%Y%m%d") for d in dr]
 
+    my_canon = normalize_team(my_team)
+    rival_canon_set = {normalize_team(r) for r in (rival_set or set())} if rival_set else set()
+
     run_times = []
     for date in date_list:
         games = get_games_for_date(d, date)
-        if not games: continue
+        if not games: 
+            continue
 
         for info in games:
-            home, away, game_id, game_date = info["home"], info["away"], info["g_id"], info["g_dt"]
-            if my_team in {home, away}:
-                opponent = home if away == my_team else away
-                if rival_set and opponent not in rival_set:
+            home_raw, away_raw = info["home"], info["away"]
+            home = normalize_team(home_raw)
+            away = normalize_team(away_raw)
+
+            if my_canon in {home, away}:
+                opponent = home if away == my_canon else away
+                if rival_canon_set and opponent not in rival_canon_set:
                     continue
                 try:
-                    rt = open_review_and_get_runtime(d, game_id, game_date)
+                    rt = open_review_and_get_runtime(d, info["g_id"], info["g_dt"])
                 except Exception:
                     rt = None
                 if rt is not None:
@@ -280,8 +319,8 @@ def compute_for_team(team_name):
             selected_team=team_name, top30=top30, avg_ref=avg_ref, bottom70=bottom70
         )
 
-    rivals_today = {m["rival"] for m in today_matches if m.get("rival")}
-    rivals_str = ", ".join(rivals_today)
+    rivals_today = {m.get("rival") for m in today_matches if m.get("rival")}
+    rivals_str = ", ".join(sorted(rivals_today))
     result = f"오늘 {team_name}의 상대팀은 {rivals_str}입니다."
 
     try:
@@ -319,7 +358,6 @@ def hour_index():
         )
         return render_template("hour.html", **ctx)
     except Exception as e:
-        # 오류를 페이지에 노출해 디버깅 쉽게
         return f"오류가 발생했습니다: {type(e).__name__}: {str(e)}", 200
 
 # ====== 진단 엔드포인트 ======
