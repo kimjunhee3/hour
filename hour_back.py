@@ -294,7 +294,9 @@ def _file_info(path):
             "mtime": time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(st.st_mtime)),
             "path": os.path.abspath(path)}
 
-@app.route("/healthz")        def healthz(): return "ok", 200
+@app.route("/healthz")        
+def healthz(): 
+    return "ok", 200
 
 @app.route("/cache/status")
 def cache_status():
