@@ -23,6 +23,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+
 # 캐시 디렉토리 (Railway 볼륨을 /data로 마운트)
 RUN mkdir -p /data
 ENV CACHE_DIR=/data
