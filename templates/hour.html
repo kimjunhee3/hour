@@ -13,20 +13,34 @@
         select:focus, button:focus { box-shadow: 0 0 4px #ff9800; outline: none;}
         hr { margin: 16px 0 12px 0; border: none; border-top: 1.5px solid #e0e0e0; display: none;}
         .result-block { margin-bottom: 10px; }
-        .comment { font-size: 0.9rem; font-weight: bold; margin-top: 6px; color: #444; padding: 4px 0 0 0;}
+
+        /* ▼▼ 여기부터 '결과 영역'만 확대/길게 ▼▼ */
+        .avg-info strong { font-size: 1.25rem; }                  /* 평균시간 문장 크게 */
+        .comment { font-size: 1rem; font-weight: bold; margin-top: 8px; color: #444; padding: 4px 0 0 0;}
+        .section-graph { margin: 16px 0; }                        /* 막대 섹션 여백 약간 확대 */
+        .section-bar-container { 
+            display: flex; align-items: center; gap: 12px;
+            width: 95vw; max-width: 1100px;                       /* 화면을 더 넓게 차지 → 막대가 오른쪽으로 길어짐 */
+        }
+        .section-bar { 
+            height: 36px;                                         /* 막대 더 두껍게 */
+            border-radius: 18px; display: flex; align-items: center; justify-content: center;
+            transition: width 0.8s ease-in-out; box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .section-label { color: white; font-weight: bold; font-size: 1rem; text-shadow: 0 1px 2px rgba(0,0,0,0.3); }
+        .section-percentage { font-weight: bold; color: #333; font-size: 1rem; min-width: 48px; }
+        .small-note { font-size: 12px; color: #888; }             /* 기준 안내문 살짝 키움 */
+        /* ▲▲ 여기까지 '결과 영역'만 수정 ▲▲ */
+
         .fast { background: none; }
         .normal { background: linear-gradient(90deg, #2196f3 0%, #6dd5ed 100%);}
         .bit-long { background: linear-gradient(90deg, #ff9800 0%, #ffc371 100%);}
         .long { background: linear-gradient(90deg, #f44336 0%, #ff6a00 100%);}
+
         .gauge-bar { width: 100%; height: 20px; background: #ececf0; border-radius: 10px; margin: 8px 0 4px 0; position: relative; box-shadow: 0 1px 4px #e0e0e0;}
         .gauge-fill { height: 100%; border-radius: 10px; position: absolute; top: 0; left: 0; transition: width 0.8s cubic-bezier(.4,2,.3,1); }
         .gauge-label { position: absolute; right: 8px; top: 0; font-weight: bold; color: #222; font-size: 0.8rem; line-height: 20px;}
         .gauge-num { position: absolute; left: 8px; top: 0; font-weight: bold; color: #222; font-size: 0.8rem; line-height: 20px;}
-        .section-graph { margin: 12px 0; }
-        .section-bar-container { display: flex; align-items: center; gap: 10px; }
-        .section-bar { height: 25px; border-radius: 12px; display: flex; align-items: center; justify-content: center; transition: width 0.8s ease-in-out; box-shadow: 0 2px 4px rgba(0,0,0,0.1);}
-        .section-label { color: white; font-weight: bold; font-size: 0.9rem; text-shadow: 0 1px 2px rgba(0,0,0,0.3); }
-        .section-percentage { font-weight: bold; color: #333; font-size: 0.9rem; min-width: 35px; }
         .team-info, .avg-info { font-size: 0.9rem; margin-bottom: 6px; color: #444;}
         @media (max-width: 700px) { .container { padding: 10px; } h2 { font-size: 1.1rem;} }
     </style>
@@ -88,7 +102,7 @@
                     </div>
                 </div>
                 <div class="comment">{{ msg }}</div>
-                <div style="font-size:10px; color:#888;">기준: 속전({{ top30 }}분 미만) / 평균({{ top30 }}-{{ avg_ref }}분) / 초과({{ avg_ref }}분 이상)</div>
+                <div class="small-note">기준: 속전({{ top30 }}분 미만) / 평균({{ top30 }}-{{ avg_ref }}분) / 초과({{ avg_ref }}분 이상)</div>
             {% else %}
                 <div class="avg-info">과거 경기 데이터가 없습니다.</div>
             {% endif %}
